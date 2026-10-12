@@ -170,6 +170,102 @@ fn find_shortcuts_advance_and_retreat_matches() {
 }
 
 #[test]
+fn marking_while_searching_does_not_jitter_or_reset_search_state() {
+    let mut h = harness();
+    h.state_mut().active = Some(0);
+    h.run_steps(2);
+    h.state_mut().views[0].open_find();
+    h.state_mut().views[0].find.as_mut().unwrap().query = "page".into();
+    h.state_mut().views[0].rerun_find();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        h.run_steps(2);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        if h.state().views[0].find.as_ref().unwrap().matches.len() >= 15 {
+            break;
+        }
+    }
+    assert_eq!(h.state().views[0].find.as_ref().unwrap().matches.len(), 15);
+    let current_before = h.state().views[0].find.as_ref().unwrap().current;
+    assert!(current_before.is_some());
+    // Clear any pending goto from initial find
+    h.run_steps(2);
+    assert!(h.state().views[0].goto.is_none());
+
+    // User draws or marks an annotation on page 0
+    let shape = pdfcraft_engine::Shape::Ink {
+        strokes: vec![vec![[10.0, 10.0], [20.0, 20.0]]],
+    };
+    let stroke = pdfcraft_engine::Edit::AddAnnotation(pdfcraft_engine::NewAnnotation {
+        page: 0,
+        style: pdfcraft_engine::Style::default_for(&shape),
+        shape,
+        contents: String::new(),
+        author: "tester".into(),
+    });
+    h.state_mut().apply_edit(stroke);
+
+    // Right after applying the edit, search matches and current match must still be valid
+    assert_eq!(
+        h.state().views[0].find.as_ref().unwrap().current,
+        current_before,
+        "applying an annotation must not wipe current search match"
+    );
+
+    // Let the canvas process the reload
+    let reload_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < reload_deadline {
+        h.run_steps(2);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(h.state().views[0].goto.is_none(), "page reload after annotation must not set goto / trigger display jitter");
+        if h.state().views[0].glyph_screen_pos(0, 0).is_some() {
+            break;
+        }
+    }
+    assert_eq!(h.state().views[0].find.as_ref().unwrap().current, current_before);
+    assert_eq!(h.state().views[0].find.as_ref().unwrap().matches.len(), 15);
+
+    // If user is viewing page 3 and reruns find, the selected match must be on page 3 (index 9), not page 0
+    h.state_mut().views[0].current = 3;
+    h.state_mut().views[0].rerun_find();
+    let current_p3 = h.state().views[0].find.as_ref().unwrap().current;
+    assert_eq!(
+        current_p3,
+        Some(9),
+        "rerun_find must select the first match at or after the viewed page (page 3), but selected {:?}",
+        current_p3
+    );
+
+    // Continuous drawing across multiple pages must never trigger viewport jumps or wipe search state
+    h.run_steps(2);
+    h.state_mut().views[0].goto = None;
+    for p in 1..=4 {
+        let shape = pdfcraft_engine::Shape::Ink {
+            strokes: vec![vec![[15.0 * p as f64, 20.0], [30.0 * p as f64, 40.0]]],
+        };
+        let stroke = pdfcraft_engine::Edit::AddAnnotation(pdfcraft_engine::NewAnnotation {
+            page: p,
+            style: pdfcraft_engine::Style::default_for(&shape),
+            shape,
+            contents: String::new(),
+            author: "tester".into(),
+        });
+        h.state_mut().apply_edit(stroke);
+        h.run_steps(2);
+        assert!(h.state().views[0].goto.is_none(), "drawing on page {p} must not set goto");
+        assert_eq!(h.state().views[0].find.as_ref().unwrap().current, Some(9));
+    }
+    let multi_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < multi_deadline {
+        h.run_steps(2);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(h.state().views[0].goto.is_none(), "multi-page reload after annotations must not set goto");
+    }
+    assert_eq!(h.state().views[0].find.as_ref().unwrap().current, Some(9));
+    assert_eq!(h.state().views[0].find.as_ref().unwrap().matches.len(), 15);
+}
+
+#[test]
 fn layouts_fit_height_labels_and_system_theme() {
     use pdfcraft_ui_egui::canvas::{Fit, PageLayout};
     let mut h = harness();
